@@ -352,9 +352,8 @@ export async function runContainerAgent(
   // These are relative paths inside groupDir that the container can read
   // directly from /workspace/group/attachments/.
   const imageAttachments = parseImageReferences([{ content: input.prompt }]);
-  const resolvedInput: ContainerInput = imageAttachments.length > 0
-    ? { ...input, imageAttachments }
-    : input;
+  const resolvedInput: ContainerInput =
+    imageAttachments.length > 0 ? { ...input, imageAttachments } : input;
 
   const logsDir = path.join(groupDir, 'logs');
   fs.mkdirSync(logsDir, { recursive: true });

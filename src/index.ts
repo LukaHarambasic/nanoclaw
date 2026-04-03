@@ -170,9 +170,12 @@ function registerGroup(jid: string, group: RegisteredGroup): void {
     );
     if (fs.existsSync(templateFile)) {
       let content = fs.readFileSync(templateFile, 'utf-8');
-      if (ASSISTANT_NAME !== 'Agent') {
-        content = content.replace(/^# Agent$/m, `# ${ASSISTANT_NAME}`);
-        content = content.replace(/You are Agent/g, `You are ${ASSISTANT_NAME}`);
+      if (ASSISTANT_NAME !== 'Agentos') {
+        content = content.replace(/^# Agentos$/m, `# ${ASSISTANT_NAME}`);
+        content = content.replace(
+          /You are Agentos/g,
+          `You are ${ASSISTANT_NAME}`,
+        );
       }
       fs.writeFileSync(groupMdFile, content);
       logger.info({ folder: group.folder }, 'Created CLAUDE.md from template');
@@ -216,10 +219,22 @@ export function _setRegisteredGroups(
 const VALID_MODELS = new Set(['haiku', 'sonnet', 'opus']);
 
 const HAIKU_KEYWORDS = [
-  'what time', 'what day', 'what date', 'current time',
-  'weather', 'tldr', 'tl;dr', 'summarize briefly',
-  'remind me', 'set timer', 'yes or no', 'ping', 'status check',
-  'how many', 'how much', 'quick question',
+  'what time',
+  'what day',
+  'what date',
+  'current time',
+  'weather',
+  'tldr',
+  'tl;dr',
+  'summarize briefly',
+  'remind me',
+  'set timer',
+  'yes or no',
+  'ping',
+  'status check',
+  'how many',
+  'how much',
+  'quick question',
 ];
 
 function classifyModel(
@@ -231,10 +246,16 @@ function classifyModel(
   // Priority 1: explicit prefix anywhere in the message (works after trigger word too)
   // e.g. "@Andy !fast what time" or "!fast do X"
   if (/\B!fast\b/i.test(trimmed)) {
-    return { model: 'haiku', cleanedContent: content.replace(/\s*!fast\b\s*/gi, ' ').trim() };
+    return {
+      model: 'haiku',
+      cleanedContent: content.replace(/\s*!fast\b\s*/gi, ' ').trim(),
+    };
   }
   if (/\B!(smart|deep)\b/i.test(trimmed)) {
-    return { model: 'opus', cleanedContent: content.replace(/\s*!(smart|deep)\b\s*/gi, ' ').trim() };
+    return {
+      model: 'opus',
+      cleanedContent: content.replace(/\s*!(smart|deep)\b\s*/gi, ' ').trim(),
+    };
   }
 
   // Priority 2: per-group default from containerConfig
@@ -243,7 +264,10 @@ function classifyModel(
     if (VALID_MODELS.has(groupModel)) {
       return { model: groupModel, cleanedContent: content };
     }
-    logger.warn({ groupFolder: group.folder, model: groupModel }, 'Invalid model in containerConfig, ignoring');
+    logger.warn(
+      { groupFolder: group.folder, model: groupModel },
+      'Invalid model in containerConfig, ignoring',
+    );
   }
 
   // Priority 3: keyword heuristic — haiku only for short simple messages
@@ -299,10 +323,16 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   // Classify model and strip prefix from the triggering (last) message
   const lastMsg = missedMessages[missedMessages.length - 1];
-  const { model: selectedModel, cleanedContent } = classifyModel(lastMsg?.content ?? '', group);
+  const { model: selectedModel, cleanedContent } = classifyModel(
+    lastMsg?.content ?? '',
+    group,
+  );
   const messagesToFormat =
     lastMsg && cleanedContent !== lastMsg.content
-      ? [...missedMessages.slice(0, -1), { ...lastMsg, content: cleanedContent }]
+      ? [
+          ...missedMessages.slice(0, -1),
+          { ...lastMsg, content: cleanedContent },
+        ]
       : missedMessages;
   const prompt = formatMessages(messagesToFormat, TIMEZONE);
 
@@ -339,49 +369,63 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   let output: 'success' | 'error' = 'error';
   try {
-    output = await runAgent(group, prompt, chatJid, async (result) => {
-      // Streaming output callback — called for each agent result
-      if (result.result) {
-        const raw =
-          typeof result.result === 'string'
-            ? result.result
-            : JSON.stringify(result.result);
-        // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
-        let text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '');
+    output = await runAgent(
+      group,
+      prompt,
+      chatJid,
+      async (result) => {
+        // Streaming output callback — called for each agent result
+        if (result.result) {
+          const raw =
+            typeof result.result === 'string'
+              ? result.result
+              : JSON.stringify(result.result);
+          // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
+          let text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '');
 
-        // Extract [SEND_FILE:/workspace/group/...] tags and upload files
-        const groupDir = resolveGroupFolderPath(group.folder);
-        const fileTagPattern = /\[SEND_FILE:([^\]]+)\]/g;
-        const filePaths: string[] = [];
-        text = text.replace(fileTagPattern, (_, containerPath: string) => {
-          const hostPath = containerPath.replace(/^\/workspace\/group\//, groupDir + '/');
-          filePaths.push(hostPath);
-          return '';
-        }).trim();
+          // Extract [SEND_FILE:/workspace/group/...] tags and upload files
+          const groupDir = resolveGroupFolderPath(group.folder);
+          const fileTagPattern = /\[SEND_FILE:([^\]]+)\]/g;
+          const filePaths: string[] = [];
+          text = text
+            .replace(fileTagPattern, (_, containerPath: string) => {
+              const hostPath = containerPath.replace(
+                /^\/workspace\/group\//,
+                groupDir + '/',
+              );
+              filePaths.push(hostPath);
+              return '';
+            })
+            .trim();
 
-        logger.info({ group: group.name }, `Agent output: ${raw.length} chars`);
-        if (text) {
-          await channel.sendMessage(chatJid, text);
-          outputSentToUser = true;
-        }
-        for (const filePath of filePaths) {
-          if (channel.sendFile) {
-            await channel.sendFile(chatJid, filePath);
+          logger.info(
+            { group: group.name },
+            `Agent output: ${raw.length} chars`,
+          );
+          if (text) {
+            await channel.sendMessage(chatJid, text);
             outputSentToUser = true;
           }
+          for (const filePath of filePaths) {
+            if (channel.sendFile) {
+              await channel.sendFile(chatJid, filePath);
+              outputSentToUser = true;
+            }
+          }
+          // Only reset idle timer on actual results, not session-update markers (result: null)
+          resetIdleTimer();
         }
-        // Only reset idle timer on actual results, not session-update markers (result: null)
-        resetIdleTimer();
-      }
 
-      if (result.status === 'success') {
-        queue.notifyIdle(chatJid);
-      }
+        if (result.status === 'success') {
+          queue.notifyIdle(chatJid);
+        }
 
-      if (result.status === 'error') {
-        hadError = true;
-      }
-    }, selectedModel);
+        if (result.status === 'error') {
+          hadError = true;
+        }
+      },
+      selectedModel,
+    );
   } finally {
     await channel.setTyping?.(chatJid, false);
     await channel.removeReaction?.(chatJid, lastMsg.id, 'thinking');
@@ -590,10 +634,16 @@ async function startMessageLoop(): Promise<void> {
           const messagesToSend =
             allPending.length > 0 ? allPending : groupMessages;
           const lastPiped = messagesToSend[messagesToSend.length - 1];
-          const { cleanedContent: cleanPiped } = classifyModel(lastPiped?.content ?? '', group);
+          const { cleanedContent: cleanPiped } = classifyModel(
+            lastPiped?.content ?? '',
+            group,
+          );
           const pipedToFormat =
             lastPiped && cleanPiped !== lastPiped.content
-              ? [...messagesToSend.slice(0, -1), { ...lastPiped, content: cleanPiped }]
+              ? [
+                  ...messagesToSend.slice(0, -1),
+                  { ...lastPiped, content: cleanPiped },
+                ]
               : messagesToSend;
           const formatted = formatMessages(pipedToFormat, TIMEZONE);
 

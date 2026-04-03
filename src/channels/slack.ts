@@ -2,7 +2,11 @@ import fs from 'fs';
 import path from 'path';
 
 import { App, LogLevel } from '@slack/bolt';
-import type { GenericMessageEvent, BotMessageEvent, FileShareMessageEvent } from '@slack/types';
+import type {
+  GenericMessageEvent,
+  BotMessageEvent,
+  FileShareMessageEvent,
+} from '@slack/types';
 
 import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
 import { updateChatName } from '../db.js';
@@ -86,7 +90,8 @@ export class SlackChannel implements Channel {
       // - 'bot_message': our own output (tracked for self-detection)
       // - 'file_share': file-only upload (no text body)
       const subtype = (event as { subtype?: string }).subtype;
-      if (subtype && subtype !== 'bot_message' && subtype !== 'file_share') return;
+      if (subtype && subtype !== 'bot_message' && subtype !== 'file_share')
+        return;
 
       // After filtering, event is GenericMessageEvent, BotMessageEvent, or FileShareMessageEvent
       const msg = event as HandledMessageEvent;
@@ -144,21 +149,37 @@ export class SlackChannel implements Channel {
         const group = groups[jid];
         const groupDir = group ? resolveGroupFolderPath(group.folder) : null;
         if (groupDir) {
-          const files = (event as { files?: Array<{ id: string; mimetype: string; url_private?: string; name?: string | null }> }).files || [];
+          const files =
+            (
+              event as {
+                files?: Array<{
+                  id: string;
+                  mimetype: string;
+                  url_private?: string;
+                  name?: string | null;
+                }>;
+              }
+            ).files || [];
           for (const file of files) {
-            if (!file.url_private || !isSupportedImageType(file.mimetype)) continue;
+            if (!file.url_private || !isSupportedImageType(file.mimetype))
+              continue;
             try {
-              const buffer = await downloadToBuffer(
-                file.url_private,
-                { Authorization: `Bearer ${this.botToken}` },
-              );
+              const buffer = await downloadToBuffer(file.url_private, {
+                Authorization: `Bearer ${this.botToken}`,
+              });
               const result = await processImage(buffer, groupDir, '');
               if (result) {
                 content = (content ? content + '\n' : '') + result.content;
-                logger.info({ fileId: file.id, path: result.relativePath }, 'Processed image attachment');
+                logger.info(
+                  { fileId: file.id, path: result.relativePath },
+                  'Processed image attachment',
+                );
               }
             } catch (err) {
-              logger.warn({ fileId: file.id, err }, 'Image download/processing failed');
+              logger.warn(
+                { fileId: file.id, err },
+                'Image download/processing failed',
+              );
             }
           }
         }
@@ -218,7 +239,11 @@ export class SlackChannel implements Channel {
     try {
       // Slack limits messages to ~4000 characters; split if needed
       if (text.length <= MAX_MESSAGE_LENGTH) {
-        await this.app.client.chat.postMessage({ channel: channelId, text, mrkdwn: true });
+        await this.app.client.chat.postMessage({
+          channel: channelId,
+          text,
+          mrkdwn: true,
+        });
       } else {
         for (let i = 0; i < text.length; i += MAX_MESSAGE_LENGTH) {
           await this.app.client.chat.postMessage({
@@ -238,7 +263,11 @@ export class SlackChannel implements Channel {
     }
   }
 
-  async sendFile(jid: string, filePath: string, filename?: string): Promise<void> {
+  async sendFile(
+    jid: string,
+    filePath: string,
+    filename?: string,
+  ): Promise<void> {
     const channelId = jid.replace(/^slack:/, '');
     try {
       const buffer = fs.readFileSync(filePath);
@@ -273,22 +302,41 @@ export class SlackChannel implements Channel {
     // no-op: Slack Bot API has no typing indicator endpoint
   }
 
-  async addReaction(jid: string, messageId: string, emoji: string): Promise<void> {
+  async addReaction(
+    jid: string,
+    messageId: string,
+    emoji: string,
+  ): Promise<void> {
     const channelId = jid.replace(/^slack:/, '');
     try {
-      await this.app.client.reactions.add({ channel: channelId, timestamp: messageId, name: emoji });
+      await this.app.client.reactions.add({
+        channel: channelId,
+        timestamp: messageId,
+        name: emoji,
+      });
     } catch (err) {
       logger.debug({ jid, messageId, emoji, err }, 'Failed to add reaction');
     }
   }
 
-  async removeReaction(jid: string, messageId: string, emoji: string): Promise<void> {
+  async removeReaction(
+    jid: string,
+    messageId: string,
+    emoji: string,
+  ): Promise<void> {
     const channelId = jid.replace(/^slack:/, '');
     logger.info({ jid, messageId, emoji }, 'Removing reaction');
     try {
-      const result = await this.app.client.reactions.remove({ channel: channelId, timestamp: messageId, name: emoji });
+      const result = await this.app.client.reactions.remove({
+        channel: channelId,
+        timestamp: messageId,
+        name: emoji,
+      });
       if (!result.ok) {
-        logger.warn({ jid, messageId, emoji, error: result.error }, 'reactions.remove returned not-ok');
+        logger.warn(
+          { jid, messageId, emoji, error: result.error },
+          'reactions.remove returned not-ok',
+        );
       } else {
         logger.info({ jid, messageId, emoji }, 'Reaction removed');
       }

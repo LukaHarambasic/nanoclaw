@@ -52,7 +52,10 @@ export async function processImage(
   if (!buffer || buffer.length === 0) return null;
 
   const resized = await sharp(buffer)
-    .resize(MAX_DIMENSION, MAX_DIMENSION, { fit: 'inside', withoutEnlargement: true })
+    .resize(MAX_DIMENSION, MAX_DIMENSION, {
+      fit: 'inside',
+      withoutEnlargement: true,
+    })
     .jpeg({ quality: JPEG_QUALITY })
     .toBuffer();
 
@@ -102,35 +105,44 @@ export async function downloadToBuffer(
   headers: Record<string, string>,
 ): Promise<Buffer> {
   return new Promise((resolve, reject) => {
-    const get = (targetUrl: string, redirectHeaders: Record<string, string>) => {
+    const get = (
+      targetUrl: string,
+      redirectHeaders: Record<string, string>,
+    ) => {
       const protocol = targetUrl.startsWith('https') ? https : http;
-      const req = protocol.get(targetUrl, { headers: redirectHeaders }, (res) => {
-        if (res.statusCode === 301 || res.statusCode === 302) {
-          const location = res.headers.location;
-          if (location) {
-            const isSameHost = location.includes('slack.com');
-            get(location, isSameHost ? redirectHeaders : {});
+      const req = protocol.get(
+        targetUrl,
+        { headers: redirectHeaders },
+        (res) => {
+          if (res.statusCode === 301 || res.statusCode === 302) {
+            const location = res.headers.location;
+            if (location) {
+              const isSameHost = location.includes('slack.com');
+              get(location, isSameHost ? redirectHeaders : {});
+              return;
+            }
+          }
+          if (res.statusCode !== 200) {
+            reject(new Error(`HTTP ${res.statusCode}`));
             return;
           }
-        }
-        if (res.statusCode !== 200) {
-          reject(new Error(`HTTP ${res.statusCode}`));
-          return;
-        }
-        const contentType = res.headers['content-type'] || '';
-        if (contentType.includes('text/html')) {
-          res.resume();
-          reject(new Error(
-            'Slack returned an HTML page instead of the image file. ' +
-            'Ensure your Slack app has the "files:read" OAuth scope.'
-          ));
-          return;
-        }
-        const chunks: Buffer[] = [];
-        res.on('data', (chunk: Buffer) => chunks.push(chunk));
-        res.on('end', () => resolve(Buffer.concat(chunks)));
-        res.on('error', reject);
-      });
+          const contentType = res.headers['content-type'] || '';
+          if (contentType.includes('text/html')) {
+            res.resume();
+            reject(
+              new Error(
+                'Slack returned an HTML page instead of the image file. ' +
+                  'Ensure your Slack app has the "files:read" OAuth scope.',
+              ),
+            );
+            return;
+          }
+          const chunks: Buffer[] = [];
+          res.on('data', (chunk: Buffer) => chunks.push(chunk));
+          res.on('end', () => resolve(Buffer.concat(chunks)));
+          res.on('error', reject);
+        },
+      );
       req.on('error', reject);
       req.setTimeout(30_000, () => req.destroy(new Error('Download timeout')));
     };

@@ -1,1 +1,42 @@
 npm run format:fix
+
+# --- PII / secrets guard ---
+# Block commits that contain personal information or API keys.
+# Patterns are case-insensitive. Add new patterns as needed.
+
+# Exclude files that are allowed to contain personal info/patterns:
+#   .husky/        — the hook itself lists the patterns
+#   groups/        — per-agent CLAUDE.md files intentionally contain personal context
+STAGED_FILES=$(git diff --cached --name-only --diff-filter=ACM | grep -v '^\.husky/' | grep -v '^groups/')
+
+if [ -z "$STAGED_FILES" ]; then
+  exit 0
+fi
+
+check_pattern() {
+  pattern="$1"
+  MATCHES=$(echo "$STAGED_FILES" | xargs grep -l -i -E "$pattern" 2>/dev/null || true)
+  if [ -n "$MATCHES" ]; then
+    echo "ERROR: PII/secret pattern '$pattern' found in:"
+    echo "$MATCHES" | sed 's/^/  /'
+    return 1
+  fi
+  return 0
+}
+
+FOUND=0
+check_pattern "Electricity Maps"   || FOUND=1
+check_pattern "harambasic\.de"     || FOUND=1
+check_pattern "Europe/Copenhagen"  || FOUND=1
+check_pattern "xoxb-"              || FOUND=1
+check_pattern "xapp-"              || FOUND=1
+check_pattern "sk-ant-"            || FOUND=1
+check_pattern "ANTHROPIC_API_KEY"  || FOUND=1
+check_pattern "phc_"               || FOUND=1
+
+if [ "$FOUND" -eq 1 ]; then
+  echo ""
+  echo "Commit blocked. Remove personal info or secrets before committing."
+  echo "To bypass (use with caution): git commit --no-verify"
+  exit 1
+fi
