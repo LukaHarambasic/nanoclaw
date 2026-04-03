@@ -170,9 +170,9 @@ function registerGroup(jid: string, group: RegisteredGroup): void {
     );
     if (fs.existsSync(templateFile)) {
       let content = fs.readFileSync(templateFile, 'utf-8');
-      if (ASSISTANT_NAME !== 'Andy') {
-        content = content.replace(/^# Andy$/m, `# ${ASSISTANT_NAME}`);
-        content = content.replace(/You are Andy/g, `You are ${ASSISTANT_NAME}`);
+      if (ASSISTANT_NAME !== 'Agent') {
+        content = content.replace(/^# Agent$/m, `# ${ASSISTANT_NAME}`);
+        content = content.replace(/You are Agent/g, `You are ${ASSISTANT_NAME}`);
       }
       fs.writeFileSync(groupMdFile, content);
       logger.info({ folder: group.folder }, 'Created CLAUDE.md from template');
@@ -213,6 +213,53 @@ export function _setRegisteredGroups(
   registeredGroups = groups;
 }
 
+const VALID_MODELS = new Set(['haiku', 'sonnet', 'opus']);
+
+const HAIKU_KEYWORDS = [
+  'what time', 'what day', 'what date', 'current time',
+  'weather', 'tldr', 'tl;dr', 'summarize briefly',
+  'remind me', 'set timer', 'yes or no', 'ping', 'status check',
+  'how many', 'how much', 'quick question',
+];
+
+function classifyModel(
+  content: string,
+  group: RegisteredGroup,
+): { model: string | undefined; cleanedContent: string } {
+  const trimmed = content.trim();
+
+  // Priority 1: explicit prefix anywhere in the message (works after trigger word too)
+  // e.g. "@Andy !fast what time" or "!fast do X"
+  if (/\B!fast\b/i.test(trimmed)) {
+    return { model: 'haiku', cleanedContent: content.replace(/\s*!fast\b\s*/gi, ' ').trim() };
+  }
+  if (/\B!(smart|deep)\b/i.test(trimmed)) {
+    return { model: 'opus', cleanedContent: content.replace(/\s*!(smart|deep)\b\s*/gi, ' ').trim() };
+  }
+
+  // Priority 2: per-group default from containerConfig
+  const groupModel = group.containerConfig?.model;
+  if (groupModel) {
+    if (VALID_MODELS.has(groupModel)) {
+      return { model: groupModel, cleanedContent: content };
+    }
+    logger.warn({ groupFolder: group.folder, model: groupModel }, 'Invalid model in containerConfig, ignoring');
+  }
+
+  // Priority 3: keyword heuristic — haiku only for short simple messages
+  const lower = trimmed.toLowerCase();
+  if (trimmed.length < 120) {
+    for (const kw of HAIKU_KEYWORDS) {
+      if (lower.includes(kw)) {
+        return { model: 'haiku', cleanedContent: content };
+      }
+    }
+  }
+
+  // Default: undefined → SDK picks sonnet
+  return { model: undefined, cleanedContent: content };
+}
+
 /**
  * Process all pending messages for a group.
  * Called by the GroupQueue when it's this group's turn.
@@ -250,7 +297,14 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     if (!hasTrigger) return true;
   }
 
-  const prompt = formatMessages(missedMessages, TIMEZONE);
+  // Classify model and strip prefix from the triggering (last) message
+  const lastMsg = missedMessages[missedMessages.length - 1];
+  const { model: selectedModel, cleanedContent } = classifyModel(lastMsg?.content ?? '', group);
+  const messagesToFormat =
+    lastMsg && cleanedContent !== lastMsg.content
+      ? [...missedMessages.slice(0, -1), { ...lastMsg, content: cleanedContent }]
+      : missedMessages;
+  const prompt = formatMessages(messagesToFormat, TIMEZONE);
 
   // Advance cursor so the piping path in startMessageLoop won't re-fetch
   // these messages. Save the old cursor so we can roll back on error.
@@ -279,38 +333,60 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   };
 
   await channel.setTyping?.(chatJid, true);
+  await channel.addReaction?.(chatJid, lastMsg.id, 'thinking');
   let hadError = false;
   let outputSentToUser = false;
 
-  const output = await runAgent(group, prompt, chatJid, async (result) => {
-    // Streaming output callback — called for each agent result
-    if (result.result) {
-      const raw =
-        typeof result.result === 'string'
-          ? result.result
-          : JSON.stringify(result.result);
-      // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
-      const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
-      logger.info({ group: group.name }, `Agent output: ${raw.length} chars`);
-      if (text) {
-        await channel.sendMessage(chatJid, text);
-        outputSentToUser = true;
+  let output: 'success' | 'error' = 'error';
+  try {
+    output = await runAgent(group, prompt, chatJid, async (result) => {
+      // Streaming output callback — called for each agent result
+      if (result.result) {
+        const raw =
+          typeof result.result === 'string'
+            ? result.result
+            : JSON.stringify(result.result);
+        // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
+        let text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '');
+
+        // Extract [SEND_FILE:/workspace/group/...] tags and upload files
+        const groupDir = resolveGroupFolderPath(group.folder);
+        const fileTagPattern = /\[SEND_FILE:([^\]]+)\]/g;
+        const filePaths: string[] = [];
+        text = text.replace(fileTagPattern, (_, containerPath: string) => {
+          const hostPath = containerPath.replace(/^\/workspace\/group\//, groupDir + '/');
+          filePaths.push(hostPath);
+          return '';
+        }).trim();
+
+        logger.info({ group: group.name }, `Agent output: ${raw.length} chars`);
+        if (text) {
+          await channel.sendMessage(chatJid, text);
+          outputSentToUser = true;
+        }
+        for (const filePath of filePaths) {
+          if (channel.sendFile) {
+            await channel.sendFile(chatJid, filePath);
+            outputSentToUser = true;
+          }
+        }
+        // Only reset idle timer on actual results, not session-update markers (result: null)
+        resetIdleTimer();
       }
-      // Only reset idle timer on actual results, not session-update markers (result: null)
-      resetIdleTimer();
-    }
 
-    if (result.status === 'success') {
-      queue.notifyIdle(chatJid);
-    }
+      if (result.status === 'success') {
+        queue.notifyIdle(chatJid);
+      }
 
-    if (result.status === 'error') {
-      hadError = true;
-    }
-  });
-
-  await channel.setTyping?.(chatJid, false);
-  if (idleTimer) clearTimeout(idleTimer);
+      if (result.status === 'error') {
+        hadError = true;
+      }
+    }, selectedModel);
+  } finally {
+    await channel.setTyping?.(chatJid, false);
+    await channel.removeReaction?.(chatJid, lastMsg.id, 'thinking');
+    if (idleTimer) clearTimeout(idleTimer);
+  }
 
   if (output === 'error' || hadError) {
     // If we already sent output to the user, don't roll back the cursor —
@@ -340,6 +416,7 @@ async function runAgent(
   prompt: string,
   chatJid: string,
   onOutput?: (output: ContainerOutput) => Promise<void>,
+  model?: string,
 ): Promise<'success' | 'error'> {
   const isMain = group.isMain === true;
   const sessionId = sessions[group.folder];
@@ -391,6 +468,7 @@ async function runAgent(
         chatJid,
         isMain,
         assistantName: ASSISTANT_NAME,
+        model,
       },
       (proc, containerName) =>
         queue.registerProcess(chatJid, proc, containerName, group.folder),
@@ -410,7 +488,9 @@ async function runAgent(
       const isStaleSession =
         sessionId &&
         output.error &&
-        /no conversation found|ENOENT.*\.jsonl|session.*not found/i.test(output.error);
+        /no conversation found|ENOENT.*\.jsonl|session.*not found/i.test(
+          output.error,
+        );
 
       if (isStaleSession) {
         logger.warn(
@@ -509,7 +589,13 @@ async function startMessageLoop(): Promise<void> {
           );
           const messagesToSend =
             allPending.length > 0 ? allPending : groupMessages;
-          const formatted = formatMessages(messagesToSend, TIMEZONE);
+          const lastPiped = messagesToSend[messagesToSend.length - 1];
+          const { cleanedContent: cleanPiped } = classifyModel(lastPiped?.content ?? '', group);
+          const pipedToFormat =
+            lastPiped && cleanPiped !== lastPiped.content
+              ? [...messagesToSend.slice(0, -1), { ...lastPiped, content: cleanPiped }]
+              : messagesToSend;
+          const formatted = formatMessages(pipedToFormat, TIMEZONE);
 
           if (queue.sendMessage(chatJid, formatted)) {
             logger.debug(

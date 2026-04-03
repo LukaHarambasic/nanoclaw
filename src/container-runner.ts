@@ -16,6 +16,7 @@ import {
   ONECLI_URL,
   TIMEZONE,
 } from './config.js';
+import { parseImageReferences, ImageAttachment } from './image.js';
 import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
 import { logger } from './logger.js';
 import {
@@ -43,6 +44,8 @@ export interface ContainerInput {
   isScheduledTask?: boolean;
   assistantName?: string;
   script?: string;
+  model?: string; // SDK shortname: 'haiku' | 'sonnet' | 'opus'. Omit for SDK default.
+  imageAttachments?: ImageAttachment[]; // Relative paths to images in /workspace/group/
 }
 
 export interface ContainerOutput {
@@ -233,6 +236,22 @@ async function buildContainerArgs(
   // Pass host timezone so container's local time matches the user's
   args.push('-e', `TZ=${TIMEZONE}`);
 
+  // Google Workspace CLI credentials (personal account)
+  // Exported via `gws auth export --unmasked > ~/.config/gws/personal/credentials.json`
+  const gwsCredentials = path.join(
+    process.env.HOME || '/root',
+    '.config',
+    'gws',
+    'personal',
+    'credentials.json',
+  );
+  if (fs.existsSync(gwsCredentials)) {
+    args.push(
+      '-v',
+      `${gwsCredentials}:/home/node/.config/gws/credentials.json:ro`,
+    );
+  }
+
   // OneCLI gateway handles credential injection — containers never see real secrets.
   // The gateway intercepts HTTPS traffic and injects API keys or OAuth tokens.
   const onecliApplied = await onecli.applyContainerConfig(args, {
@@ -250,6 +269,14 @@ async function buildContainerArgs(
 
   // Runtime-specific args for host gateway resolution
   args.push(...hostGatewayArgs());
+
+  // Allow Chrome/Chromium to run headless inside the container.
+  // Docker's default seccomp profile blocks syscalls Chrome needs at startup,
+  // causing a SIGTRAP crash before --no-sandbox or other flags take effect.
+  args.push('--security-opt', 'seccomp=unconfined');
+  // Docker's default AppArmor profile (docker-default) blocks Chrome's
+  // crashpad handler subprocess at the MAC level.
+  args.push('--security-opt', 'apparmor=unconfined');
 
   // Run as host user so bind-mounted files are accessible.
   // Skip when running as root (uid 0), as the container's node user (uid 1000),
@@ -321,6 +348,14 @@ export async function runContainerAgent(
     'Spawning container agent',
   );
 
+  // Parse [Image: attachments/...] references from the prompt text.
+  // These are relative paths inside groupDir that the container can read
+  // directly from /workspace/group/attachments/.
+  const imageAttachments = parseImageReferences([{ content: input.prompt }]);
+  const resolvedInput: ContainerInput = imageAttachments.length > 0
+    ? { ...input, imageAttachments }
+    : input;
+
   const logsDir = path.join(groupDir, 'logs');
   fs.mkdirSync(logsDir, { recursive: true });
 
@@ -336,7 +371,7 @@ export async function runContainerAgent(
     let stdoutTruncated = false;
     let stderrTruncated = false;
 
-    container.stdin.write(JSON.stringify(input));
+    container.stdin.write(JSON.stringify(resolvedInput));
     container.stdin.end();
 
     // Streaming output: parse OUTPUT_START/END marker pairs as they arrive
@@ -385,7 +420,19 @@ export async function runContainerAgent(
             resetTimeout();
             // Call onOutput for all markers (including null results)
             // so idle timers start even for "silent" query completions.
-            outputChain = outputChain.then(() => onOutput(parsed));
+            // Wrap in try/catch so a callback error never rejects outputChain —
+            // a rejected outputChain would cause the close handler's .then() to
+            // silently skip resolve(), hanging runContainerAgent forever.
+            outputChain = outputChain.then(async () => {
+              try {
+                await onOutput(parsed);
+              } catch (err) {
+                logger.warn(
+                  { group: group.name, err },
+                  'onOutput callback error, continuing',
+                );
+              }
+            });
           } catch (err) {
             logger.warn(
               { group: group.name, error: err },

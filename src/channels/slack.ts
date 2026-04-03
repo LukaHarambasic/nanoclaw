@@ -1,9 +1,18 @@
+import fs from 'fs';
+import path from 'path';
+
 import { App, LogLevel } from '@slack/bolt';
-import type { GenericMessageEvent, BotMessageEvent } from '@slack/types';
+import type { GenericMessageEvent, BotMessageEvent, FileShareMessageEvent } from '@slack/types';
 
 import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
 import { updateChatName } from '../db.js';
 import { readEnvFile } from '../env.js';
+import { resolveGroupFolderPath } from '../group-folder.js';
+import {
+  downloadToBuffer,
+  isSupportedImageType,
+  processImage,
+} from '../image.js';
 import { logger } from '../logger.js';
 import { registerChannel, ChannelOpts } from './registry.js';
 import {
@@ -32,6 +41,7 @@ export class SlackChannel implements Channel {
   name = 'slack';
 
   private app: App;
+  private botToken: string;
   private botUserId: string | undefined;
   private connected = false;
   private outgoingQueue: Array<{ jid: string; text: string }> = [];
@@ -48,6 +58,7 @@ export class SlackChannel implements Channel {
     const env = readEnvFile(['SLACK_BOT_TOKEN', 'SLACK_APP_TOKEN']);
     const botToken = env.SLACK_BOT_TOKEN;
     const appToken = env.SLACK_APP_TOKEN;
+    this.botToken = botToken || '';
 
     if (!botToken || !appToken) {
       throw new Error(
@@ -70,14 +81,20 @@ export class SlackChannel implements Channel {
     // message subtypes including bot_message (needed to track our own output)
     this.app.event('message', async ({ event }) => {
       // Bolt's event type is the full MessageEvent union (17+ subtypes).
-      // We filter on subtype first, then narrow to the two types we handle.
+      // We filter on subtype first, then narrow to the types we handle:
+      // - undefined: regular user message (may include files)
+      // - 'bot_message': our own output (tracked for self-detection)
+      // - 'file_share': file-only upload (no text body)
       const subtype = (event as { subtype?: string }).subtype;
-      if (subtype && subtype !== 'bot_message') return;
+      if (subtype && subtype !== 'bot_message' && subtype !== 'file_share') return;
 
-      // After filtering, event is either GenericMessageEvent or BotMessageEvent
+      // After filtering, event is GenericMessageEvent, BotMessageEvent, or FileShareMessageEvent
       const msg = event as HandledMessageEvent;
 
-      if (!msg.text) return;
+      // For file_share events text is often empty — that's fine, images carry the content.
+      // For all other subtypes, skip if there's no text and no files.
+      const hasFiles = !!(event as { files?: unknown[] }).files?.length;
+      if (!msg.text && !hasFiles) return;
 
       // Threaded replies are flattened into the channel conversation.
       // The agent sees them alongside channel-level messages; responses
@@ -94,8 +111,7 @@ export class SlackChannel implements Channel {
       const groups = this.opts.registeredGroups();
       if (!groups[jid]) return;
 
-      const isBotMessage =
-        !!msg.bot_id || msg.user === this.botUserId;
+      const isBotMessage = !!msg.bot_id || msg.user === this.botUserId;
 
       let senderName: string;
       if (isBotMessage) {
@@ -110,13 +126,46 @@ export class SlackChannel implements Channel {
       // Translate Slack <@UBOTID> mentions into TRIGGER_PATTERN format.
       // Slack encodes @mentions as <@U12345>, which won't match TRIGGER_PATTERN
       // (e.g., ^@<ASSISTANT_NAME>\b), so we prepend the trigger when the bot is @mentioned.
-      let content = msg.text;
+      let content = msg.text || '';
       if (this.botUserId && !isBotMessage) {
         const mentionPattern = `<@${this.botUserId}>`;
-        if (content.includes(mentionPattern) && !TRIGGER_PATTERN.test(content)) {
+        if (
+          content.includes(mentionPattern) &&
+          !TRIGGER_PATTERN.test(content)
+        ) {
           content = `@${ASSISTANT_NAME} ${content}`;
         }
       }
+
+      // Download image file attachments, resize via sharp, convert to JPEG,
+      // and save to the group's attachments/ directory (mounted in the container
+      // at /workspace/group/attachments/).
+      if (!isBotMessage && hasFiles) {
+        const group = groups[jid];
+        const groupDir = group ? resolveGroupFolderPath(group.folder) : null;
+        if (groupDir) {
+          const files = (event as { files?: Array<{ id: string; mimetype: string; url_private?: string; name?: string | null }> }).files || [];
+          for (const file of files) {
+            if (!file.url_private || !isSupportedImageType(file.mimetype)) continue;
+            try {
+              const buffer = await downloadToBuffer(
+                file.url_private,
+                { Authorization: `Bearer ${this.botToken}` },
+              );
+              const result = await processImage(buffer, groupDir, '');
+              if (result) {
+                content = (content ? content + '\n' : '') + result.content;
+                logger.info({ fileId: file.id, path: result.relativePath }, 'Processed image attachment');
+              }
+            } catch (err) {
+              logger.warn({ fileId: file.id, err }, 'Image download/processing failed');
+            }
+          }
+        }
+      }
+
+      // Skip if still nothing to deliver
+      if (!content) return;
 
       this.opts.onMessage(jid, {
         id: msg.ts,
@@ -142,10 +191,7 @@ export class SlackChannel implements Channel {
       this.botUserId = auth.user_id as string;
       logger.info({ botUserId: this.botUserId }, 'Connected to Slack');
     } catch (err) {
-      logger.warn(
-        { err },
-        'Connected to Slack but failed to get bot user ID',
-      );
+      logger.warn({ err }, 'Connected to Slack but failed to get bot user ID');
     }
 
     this.connected = true;
@@ -172,12 +218,13 @@ export class SlackChannel implements Channel {
     try {
       // Slack limits messages to ~4000 characters; split if needed
       if (text.length <= MAX_MESSAGE_LENGTH) {
-        await this.app.client.chat.postMessage({ channel: channelId, text });
+        await this.app.client.chat.postMessage({ channel: channelId, text, mrkdwn: true });
       } else {
         for (let i = 0; i < text.length; i += MAX_MESSAGE_LENGTH) {
           await this.app.client.chat.postMessage({
             channel: channelId,
             text: text.slice(i, i + MAX_MESSAGE_LENGTH),
+            mrkdwn: true,
           });
         }
       }
@@ -188,6 +235,21 @@ export class SlackChannel implements Channel {
         { jid, err, queueSize: this.outgoingQueue.length },
         'Failed to send Slack message, queued',
       );
+    }
+  }
+
+  async sendFile(jid: string, filePath: string, filename?: string): Promise<void> {
+    const channelId = jid.replace(/^slack:/, '');
+    try {
+      const buffer = fs.readFileSync(filePath);
+      await this.app.client.files.uploadV2({
+        channel_id: channelId,
+        file: buffer,
+        filename: filename ?? path.basename(filePath),
+      });
+      logger.info({ jid, filePath }, 'Slack file uploaded');
+    } catch (err) {
+      logger.error({ jid, filePath, err }, 'Failed to upload file to Slack');
     }
   }
 
@@ -209,6 +271,30 @@ export class SlackChannel implements Channel {
   // doesn't need channel-specific branching.
   async setTyping(_jid: string, _isTyping: boolean): Promise<void> {
     // no-op: Slack Bot API has no typing indicator endpoint
+  }
+
+  async addReaction(jid: string, messageId: string, emoji: string): Promise<void> {
+    const channelId = jid.replace(/^slack:/, '');
+    try {
+      await this.app.client.reactions.add({ channel: channelId, timestamp: messageId, name: emoji });
+    } catch (err) {
+      logger.debug({ jid, messageId, emoji, err }, 'Failed to add reaction');
+    }
+  }
+
+  async removeReaction(jid: string, messageId: string, emoji: string): Promise<void> {
+    const channelId = jid.replace(/^slack:/, '');
+    logger.info({ jid, messageId, emoji }, 'Removing reaction');
+    try {
+      const result = await this.app.client.reactions.remove({ channel: channelId, timestamp: messageId, name: emoji });
+      if (!result.ok) {
+        logger.warn({ jid, messageId, emoji, error: result.error }, 'reactions.remove returned not-ok');
+      } else {
+        logger.info({ jid, messageId, emoji }, 'Reaction removed');
+      }
+    } catch (err) {
+      logger.warn({ jid, messageId, emoji, err }, 'Failed to remove reaction');
+    }
   }
 
   /**
@@ -245,9 +331,7 @@ export class SlackChannel implements Channel {
     }
   }
 
-  private async resolveUserName(
-    userId: string,
-  ): Promise<string | undefined> {
+  private async resolveUserName(userId: string): Promise<string | undefined> {
     if (!userId) return undefined;
 
     const cached = this.userNameCache.get(userId);
@@ -278,6 +362,7 @@ export class SlackChannel implements Channel {
         await this.app.client.chat.postMessage({
           channel: channelId,
           text: item.text,
+          mrkdwn: true,
         });
         logger.info(
           { jid: item.jid, length: item.text.length },

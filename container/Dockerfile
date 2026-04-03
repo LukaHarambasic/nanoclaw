@@ -26,12 +26,28 @@ RUN apt-get update && apt-get install -y \
     git \
     && rm -rf /var/lib/apt/lists/*
 
-# Set Chromium path for agent-browser
-ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium
-ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium
+# Install GitHub CLI (amd64 / Intel)
+RUN GH_VERSION="2.65.0" && \
+    curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_amd64.tar.gz" \
+    | tar -xz -C /usr/local --strip-components=1 "gh_${GH_VERSION}_linux_amd64/bin/gh"
 
-# Install agent-browser and claude-code globally
-RUN npm install -g agent-browser @anthropic-ai/claude-code
+# Install OpenCode
+RUN curl -fsSL https://opencode.ai/install | bash
+
+# Install agent-browser, claude-code, and Google Workspace CLI globally
+RUN npm install -g agent-browser @anthropic-ai/claude-code @googleworkspace/cli
+
+# Install Playwright's Headless Shell — avoids the crashpad bug in system Chromium
+# and is more stable in containers. Symlink to a fixed path so the env var
+# doesn't need to encode the version-specific directory name.
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+RUN npx playwright install chromium && \
+    find /ms-playwright -name 'chrome-headless-shell' -type f \
+        -exec ln -s {} /usr/local/bin/chrome-headless-shell \;
+
+# Point agent-browser at the Playwright Headless Shell
+ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/local/bin/chrome-headless-shell
+ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/local/bin/chrome-headless-shell
 
 # Create app directory
 WORKDIR /app

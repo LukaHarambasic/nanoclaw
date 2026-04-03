@@ -20,6 +20,11 @@ import { execFile } from 'child_process';
 import { query, HookCallback, PreCompactHookInput } from '@anthropic-ai/claude-agent-sdk';
 import { fileURLToPath } from 'url';
 
+interface ImageAttachment {
+  relativePath: string;  // Path relative to /workspace/group/ (e.g. "attachments/img-123.jpg")
+  mediaType: string;
+}
+
 interface ContainerInput {
   prompt: string;
   sessionId?: string;
@@ -29,6 +34,8 @@ interface ContainerInput {
   isScheduledTask?: boolean;
   assistantName?: string;
   script?: string;
+  model?: string; // SDK shortname: 'haiku' | 'sonnet' | 'opus'. Omit for SDK default.
+  imageAttachments?: ImageAttachment[]; // Relative paths to images in /workspace/group/
 }
 
 interface ContainerOutput {
@@ -49,9 +56,13 @@ interface SessionsIndex {
   entries: SessionEntry[];
 }
 
+type ContentBlock =
+  | { type: 'text'; text: string }
+  | { type: 'image'; source: { type: 'base64'; media_type: string; data: string } };
+
 interface SDKUserMessage {
   type: 'user';
-  message: { role: 'user'; content: string };
+  message: { role: 'user'; content: string | ContentBlock[] };
   parent_tool_use_id: null;
   session_id: string;
 }
@@ -73,6 +84,17 @@ class MessageStream {
     this.queue.push({
       type: 'user',
       message: { role: 'user', content: text },
+      parent_tool_use_id: null,
+      session_id: '',
+    });
+    this.waiting?.();
+  }
+
+  /** Push a multimodal message with image content blocks. */
+  pushMultimodal(blocks: ContentBlock[]): void {
+    this.queue.push({
+      type: 'user',
+      message: { role: 'user', content: blocks },
       parent_tool_use_id: null,
       session_id: '',
     });
@@ -338,9 +360,33 @@ async function runQuery(
   containerInput: ContainerInput,
   sdkEnv: Record<string, string | undefined>,
   resumeAt?: string,
+  imageAttachments?: ImageAttachment[],
 ): Promise<{ newSessionId?: string; lastAssistantUuid?: string; closedDuringQuery: boolean }> {
   const stream = new MessageStream();
-  stream.push(prompt);
+
+  // Load image attachments from the group workspace and send as multimodal
+  // content blocks BEFORE the text prompt (matches WhatsApp image-vision pattern)
+  if (imageAttachments?.length) {
+    const blocks: ContentBlock[] = [];
+    for (const img of imageAttachments) {
+      const imgPath = path.join('/workspace/group', img.relativePath);
+      try {
+        const data = fs.readFileSync(imgPath).toString('base64');
+        blocks.push({ type: 'image', source: { type: 'base64', media_type: img.mediaType, data } });
+        log(`Loaded image: ${imgPath} (${data.length} chars base64)`);
+      } catch (err) {
+        log(`Failed to load image: ${imgPath} — ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    if (blocks.length > 0) {
+      blocks.push({ type: 'text', text: prompt });
+      stream.pushMultimodal(blocks);
+    } else {
+      stream.push(prompt);
+    }
+  } else {
+    stream.push(prompt);
+  }
 
   // Poll IPC for follow-up messages and _close sentinel during the query
   let ipcPolling = true;
@@ -395,6 +441,7 @@ async function runQuery(
     prompt: stream,
     options: {
       cwd: '/workspace/group',
+      model: containerInput.model,
       additionalDirectories: extraDirs.length > 0 ? extraDirs : undefined,
       resume: sessionId,
       resumeSessionAt: resumeAt,
@@ -582,7 +629,9 @@ async function main(): Promise<void> {
     while (true) {
       log(`Starting query (session: ${sessionId || 'new'}, resumeAt: ${resumeAt || 'latest'})...`);
 
-      const queryResult = await runQuery(prompt, sessionId, mcpServerPath, containerInput, sdkEnv, resumeAt);
+      // Image attachments are only passed on the first query (from the triggering message).
+      const queryAttachments = resumeAt === undefined ? containerInput.imageAttachments : undefined;
+      const queryResult = await runQuery(prompt, sessionId, mcpServerPath, containerInput, sdkEnv, resumeAt, queryAttachments);
       if (queryResult.newSessionId) {
         sessionId = queryResult.newSessionId;
       }
