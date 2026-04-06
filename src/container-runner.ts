@@ -285,6 +285,10 @@ async function buildContainerArgs(
     // Without this, git rejects the OneCLI proxy's MITM certificate.
     args.push('-e', 'GIT_SSL_CAINFO=/tmp/onecli-combined-ca.pem');
 
+    // gh CLI requires GH_TOKEN to be set or it refuses to run.
+    // The proxy replaces this placeholder with the real token via MITM injection.
+    args.push('-e', 'GH_TOKEN=proxy-managed');
+
     // Warn if OneCLI didn't inject proxy env vars — git/curl won't route through proxy
     const hasProxy = args.some(
       (a, i) => i > 0 && args[i - 1] === '-e' && /PROXY/i.test(a),
