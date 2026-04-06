@@ -346,6 +346,47 @@ export class SlackChannel implements Channel {
   }
 
   /**
+   * Create a new Slack channel, invite users, and return its JID.
+   */
+  async createChannel(
+    name: string,
+    inviteUserIds?: string[],
+  ): Promise<{ jid: string; channelId: string; name: string }> {
+    const result = await this.app.client.conversations.create({
+      name,
+      is_private: false,
+    });
+
+    const channelId = result.channel?.id;
+    const channelName = result.channel?.name;
+    if (!channelId || !channelName) {
+      throw new Error(
+        `Failed to create Slack channel: ${result.error || 'no channel ID returned'}`,
+      );
+    }
+
+    // Invite users (bot is auto-joined as creator)
+    if (inviteUserIds?.length) {
+      try {
+        await this.app.client.conversations.invite({
+          channel: channelId,
+          users: inviteUserIds.join(','),
+        });
+      } catch (err) {
+        logger.warn(
+          { channelId, inviteUserIds, err },
+          'Failed to invite some users to new channel',
+        );
+      }
+    }
+
+    const jid = `slack:${channelId}`;
+    updateChatName(jid, channelName);
+    logger.info({ channelId, name: channelName }, 'Slack channel created');
+    return { jid, channelId, name: channelName };
+  }
+
+  /**
    * Sync channel metadata from Slack.
    * Fetches channels the bot is a member of and stores their names in the DB.
    */

@@ -262,6 +262,68 @@ You can read and write to `/workspace/project/groups/global/CLAUDE.md` for facts
 
 ---
 
+## Spawning New Agents
+
+You can create a new agent with its own dedicated Slack channel using the `spawn_agent` IPC command. This creates the Slack channel, invites users, registers the group, and posts a welcome message — all in one step.
+
+```bash
+cat > /workspace/ipc/tasks/spawn_$(date +%s).json << 'ENDJSON'
+{
+  "type": "spawn_agent",
+  "name": "Project Alpha",
+  "folder": "slack_project-alpha",
+  "channelName": "project-alpha",
+  "trigger": "@Agentos",
+  "requiresTrigger": true,
+  "inviteUserIds": ["U12345", "U67890"],
+  "welcomeMessage": "Hello! I'm your dedicated agent for Project Alpha.",
+  "containerConfig": {
+    "model": "sonnet"
+  }
+}
+ENDJSON
+```
+
+### Fields
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `name` | Yes | Display name for the group |
+| `folder` | Yes | Group folder name. Use `slack_` prefix (e.g., `slack_project-alpha`) |
+| `channelName` | No | Slack channel name (derived from folder if omitted). Lowercase, hyphens, max 80 chars |
+| `trigger` | No | Trigger pattern (defaults to `@Agentos`) |
+| `requiresTrigger` | No | Whether `@trigger` is needed (default: `true`) |
+| `inviteUserIds` | No | Slack user IDs to invite to the channel |
+| `welcomeMessage` | No | First message posted in the new channel |
+| `claudeMd` | No | Custom CLAUDE.md content (uses global template if omitted) |
+| `containerConfig` | No | Container settings (model, additionalMounts, timeout) |
+
+### Checking the result
+
+After spawning, a result file is written to `/workspace/ipc/input/spawn_result_*.json`:
+
+```json
+{ "type": "spawn_agent_result", "success": true, "jid": "slack:C123ABC", "channelId": "C123ABC", "channelName": "project-alpha", "folder": "slack_project-alpha" }
+```
+
+On failure: `{ "type": "spawn_agent_result", "success": false, "error": "..." }`
+
+### Finding Slack user IDs
+
+To find user IDs to invite, query the database:
+
+```bash
+sqlite3 /workspace/project/store/messages.db "
+  SELECT DISTINCT sender, sender_name FROM messages
+  WHERE chat_jid LIKE 'slack:%'
+  ORDER BY timestamp DESC LIMIT 20;
+"
+```
+
+Or ask the user for the Slack user IDs they want invited.
+
+---
+
 ## Scheduling for Other Groups
 
 When scheduling tasks for other groups, use the `target_group_jid` parameter with the group's JID from `registered_groups.json`:

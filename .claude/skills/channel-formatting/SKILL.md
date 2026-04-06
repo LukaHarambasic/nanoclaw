@@ -19,6 +19,8 @@ Telegram.
 
 Code blocks (fenced and inline) are always protected — their content is never transformed.
 
+> **Related:** `slack-formatting` (container skill) is a reference guide that teaches the container agent to write Slack mrkdwn directly. This skill (`channel-formatting`) operates on the host and automatically converts output. Both can coexist — the host conversion handles any Markdown the agent missed.
+
 ## Phase 1: Pre-flight
 
 ### Check if already applied

@@ -5,6 +5,8 @@ description: Gmail read + draft access. Use for reading, searching, triaging, an
 
 # Gmail — Read + Draft Only
 
+> **Email skills in NanoClaw:** This skill (`gws-mail`) handles personal email via the `gws` CLI (read+draft only). For the agent account (agentosassistant@gmail.com), see `shared-email` (uses `mcp__gmail__*` tools, can send). For host-level Gmail channel integration, see `/add-gmail`.
+
 You have the `gws` CLI for Gmail access. Run `gws gmail --help` to see all Discovery methods and helpers.
 
 ## CRITICAL: Never send or delete

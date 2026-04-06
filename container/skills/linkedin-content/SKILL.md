@@ -1,11 +1,11 @@
 ---
 name: linkedin-content
-description: LinkedIn post drafting and idea extraction. Self-gating — only activates for groups with folder matching slack_personal, slack_work-emaps, or slack_bc-admin.
+description: LinkedIn post drafting and idea extraction. Self-gating — only activates for groups with folder matching slack_life, slack_work, or slack_business.
 ---
 
 # LinkedIn Content — Post Drafting
 
-**Activation check:** Only use this skill if the group folder is one of: `slack_personal`, `slack_work-emaps`, `slack_bc-admin`. Check with:
+**Activation check:** Only use this skill if the group folder is one of: `slack_life`, `slack_work`, `slack_business`. Check with:
 
 ```bash
 basename $(pwd)

@@ -13,7 +13,7 @@ Switches voice transcription from OpenAI's Whisper API to local whisper.cpp. Run
 
 ## Prerequisites
 
-- `voice-transcription` skill must be applied first (WhatsApp channel)
+- **`/add-voice-transcription` must be applied first** — this skill modifies `src/transcription.ts` which is created by the voice-transcription skill. If `src/transcription.ts` does not exist, stop and run `/add-voice-transcription` first.
 - macOS with Apple Silicon (M1+) recommended
 - `whisper-cpp` installed: `brew install whisper-cpp` (provides the `whisper-cli` binary)
 - `ffmpeg` installed: `brew install ffmpeg`

@@ -1,203 +1,253 @@
 ---
 name: github-workflow
-description: Orchestrate code changes in GitHub repositories. Plans the change, gets user confirmation, invokes OpenCode zen to implement, runs quality checks, and creates a PR. Never pushes directly to default branches.
+description: Make code changes in a GitHub repository. Checks API usage budget, plans, implements via Claude Code (respects repo CLAUDE.md/AGENTS.md), runs quality checks, and opens a PR. Never pushes to default branches.
 ---
 
 # GitHub Code Change Workflow
 
-Use this skill when the user asks to make code changes, fix bugs, add features, refactor code, or create PRs in a GitHub repository.
+Use this skill when the user asks to make code changes, fix bugs, add features, refactor, or create PRs.
 
-## 1. Pre-flight checks
+---
 
-### Configure gh via OneCLI proxy
+## 0. Usage budget check — ALWAYS run first, system stability is #1
 
-Credentials are injected by the OneCLI gateway proxy — `gh` needs a token to send requests, and the proxy replaces it with the real GitHub PAT for `github.com` traffic. Extract the agent token from `HTTPS_PROXY` and use it as `GH_TOKEN`:
+**If the system runs out of API quota, no agent in any group can work. Protecting the quota takes priority over any coding task.**
 
-```bash
-ONECLI_TOKEN=$(printf '%s' "${HTTPS_PROXY:-}" | sed 's|http://x:\(.*\)@.*|\1|')
-if [ -n "$ONECLI_TOKEN" ]; then
-  export GH_TOKEN="$ONECLI_TOKEN"
-fi
-```
-
-Then verify GitHub access actually works:
+Check current usage across all time windows before doing anything else:
 
 ```bash
-gh api user -q .login
+# Query Anthropic usage API — routed through OneCLI proxy
+USAGE=$(curl -s "https://api.anthropic.com/v1/usage" \
+  -H "anthropic-version: 2023-06-01" \
+  -H "x-api-key: placeholder" 2>/dev/null)
+echo "${USAGE}"
 ```
 
-If this fails, stop and tell the user:
-> GitHub token isn't configured for this group.
-> Ask your admin to assign a GitHub secret to the OneCLI agent:
-> 1. `onecli secrets create --name "GH_TOKEN" --type generic --value <fine-grained-pat> --host-pattern "github.com"`
-> 2. `onecli agents set-secrets --id <AGENT_ID> --secret-ids <SECRET_ID>,<existing-secret-ids>`
-> The token needs: Contents (read/write), Pull requests (read/write), Metadata (read).
+If the endpoint is unavailable, estimate conservatively from your current context window fill level and default to **Sonnet-only** mode.
 
-### Verify other tools
+### 5-hour limit (primary — governs model selection for this task)
 
-```bash
-opencode --version
-git --version
+| Remaining | Plan with | Implement with | Notes |
+|-----------|-----------|----------------|-------|
+| > 80% | Opus | Opus | Full power, use subagents freely |
+| 50–80% | Opus | Sonnet | Plan smart, execute lean |
+| 20–50% | Sonnet | Sonnet | Conservative, no large subagent fans |
+| < 20% | **STOP** | — | Do not start new coding tasks. Tell the user the budget is low and ask if this is urgent enough to proceed with Sonnet only. |
+
+### 7-day limit (rough check)
+
+- If > 85% of the 7d limit is used: treat this session as **< 20% on 5h** regardless of the 5h reading. Tell the user.
+- If 70–85% used: treat as **20–50%** tier.
+
+### 30-day limit (rough check)
+
+- If > 80% of the 30d limit is used: escalate to the user before starting any task. The monthly quota affects all groups.
+- If 60–80% used: note it to the user but proceed with conservative model selection.
+
+Store your budget assessment in one line at the top of your plan:
+
+```
+Budget: 5h=67% remaining → Opus/Sonnet | 7d=42% remaining → ok | 30d=31% remaining → ok
 ```
 
-If `opencode` is missing, stop and tell the user the container image needs to be rebuilt (`./container/build.sh`).
+---
 
-## 2. Repo setup
-
-Clone the repo on first use, or refresh if already cloned:
+## 1. Pre-flight
 
 ```bash
 OWNER="<owner>"
 REPO="<repo>"
-REPO_DIR="/workspace/group/repos/${OWNER}/${REPO}"
 
-if [ -d "${REPO_DIR}/.git" ]; then
-  cd "${REPO_DIR}"
-  git fetch --all
-  DEFAULT_BRANCH=$(git remote show origin | grep 'HEAD branch' | awk '{print $NF}')
-  git checkout "${DEFAULT_BRANCH}" && git pull
-else
-  mkdir -p "/workspace/group/repos/${OWNER}"
-  git clone --depth 50 "https://github.com/${OWNER}/${REPO}.git" "${REPO_DIR}"
-  cd "${REPO_DIR}"
-  DEFAULT_BRANCH=$(git remote show origin | grep 'HEAD branch' | awk '{print $NF}')
-fi
+# SSL config for proxy
+git config --global http.sslCAInfo /tmp/onecli-combined-ca.pem
+
+# Remove any stale credential helpers
+git config --global --remove-section credential.https://github.com 2>/dev/null || true
+git config --global --remove-section credential.https://gist.github.com 2>/dev/null || true
+
+git ls-remote "https://github.com/${OWNER}/${REPO}.git" HEAD &>/dev/null \
+  && echo "✓ git HTTPS works" || echo "✗ git HTTPS failed"
 ```
 
-## 3. Plan phase — MANDATORY, never skip
+If git HTTPS fails, stop and tell the user that GitHub authentication is not configured for this repo.
 
-Read the relevant parts of the codebase, then write a structured plan covering:
-- Which files to change and why
-- What the expected outcome is
-- What quality checks apply to this repo
+---
 
-Present the plan to the user and **wait for explicit confirmation** before proceeding. If the user asks for changes, revise and re-present. Only proceed once the user says something like "go ahead", "confirmed", "approved", or "looks good".
-
-**Do NOT write any code or create any branch before confirmation.**
-
-## 4. Implementation via OpenCode
-
-After the user confirms the plan:
+## 2. Refresh the repo
 
 ```bash
-cd "${REPO_DIR}"   # MUST be the repo root — OpenCode reads AGENTS.md/CLAUDE.md/opencode.json from here
+REPO_DIR="/workspace/group/repos/${OWNER}/${REPO}"
+cd "${REPO_DIR}"
 
-# Create branch
-GROUP_FOLDER=$(basename /workspace/group)
-BRANCH_DESC="<short-kebab-description-of-change>"
-git checkout -b "agent/${GROUP_FOLDER}/${BRANCH_DESC}"
+CURRENT_URL=$(git remote get-url origin)
+if [[ "$CURRENT_URL" == git@* ]]; then
+  git remote set-url origin "https://github.com/${OWNER}/${REPO}.git"
+fi
 
-# Determine model — group default or user-requested override
-MODEL=$(cat /workspace/group/opencode-model 2>/dev/null || echo "opencode/kimi-2.5")
-
-# Invoke OpenCode headless — it reads the repo's own skill files automatically
-opencode run \
-  --model "${MODEL}" \
-  "Implement the following confirmed plan exactly as described. Do not deviate from the plan.
-
-${CONFIRMED_PLAN_TEXT}"
+git fetch --all
+DEFAULT_BRANCH=$(git remote show origin | grep 'HEAD branch' | awk '{print $NF}')
+git checkout "${DEFAULT_BRANCH}" && git pull
 ```
 
-After OpenCode finishes, check what it did:
+---
+
+## 3. Plan — MANDATORY, never skip
+
+Read the relevant files first. Understand what the user wants, which files are involved, what conventions the repo uses (CLAUDE.md, AGENTS.md, README), and what quality checks exist.
+
+**Identify what can be done in parallel.** If the task has independent parts (e.g. update tests + update docs + refactor a module), note them — subagents can run them concurrently in step 4.
+
+Write the plan:
+- Budget line (from step 0)
+- What changes and why
+- Which files are touched
+- Parallel vs. sequential breakdown
+- Which quality checks to run
+
+Present the plan and **wait for explicit user confirmation before creating a branch or writing any code.**
+
+---
+
+## 4. Implement via Claude Code
+
+After confirmation, create the branch and run Claude Code from the repo root. The model used depends on the budget tier from step 0.
+
+```bash
+cd "${REPO_DIR}"   # CRITICAL — Claude Code reads CLAUDE.md, AGENTS.md, .claude/ from here
+
+GROUP_FOLDER=$(basename /workspace/group)
+BRANCH_DESC="<short-kebab-description>"
+git checkout -b "agent/${GROUP_FOLDER}/${BRANCH_DESC}"
+```
+
+### Model selection
+
+Set `IMPL_MODEL` based on your budget assessment:
+
+```bash
+# > 80% remaining on 5h: use Opus
+IMPL_MODEL="claude-opus-4-6"
+
+# 20–80% remaining on 5h: use Sonnet
+IMPL_MODEL="claude-sonnet-4-6"
+```
+
+### Sequential implementation (most tasks)
+
+```bash
+claude --dangerously-skip-permissions --model "${IMPL_MODEL}" \
+  "Implement the following plan. Follow all instructions in CLAUDE.md and AGENTS.md exactly.
+
+${CONFIRMED_PLAN}"
+```
+
+### Parallel implementation (when plan identified independent parts)
+
+Split into separate `claude` invocations for each independent part. Run them in parallel using background jobs or spawn them as subagents. Collect results and commit each part:
+
+```bash
+# Example: parallel independent changes
+claude --dangerously-skip-permissions --model "${IMPL_MODEL}" \
+  "Part 1: ${PART_1_DESCRIPTION}. Follow CLAUDE.md exactly." &
+PID1=$!
+
+claude --dangerously-skip-permissions --model "${IMPL_MODEL}" \
+  "Part 2: ${PART_2_DESCRIPTION}. Follow CLAUDE.md exactly." &
+PID2=$!
+
+wait $PID1 $PID2
+```
+
+Only parallelize when the parts genuinely don't touch the same files. If unsure, run sequentially.
+
+After implementation, review:
 
 ```bash
 git status
 git diff --stat HEAD
 ```
 
-If OpenCode left uncommitted changes:
+If uncommitted changes remain:
+
 ```bash
 git add -A
-git commit -m "<concise description of change>"
+git commit -m "<concise present-tense description>"
 ```
 
-### Model selection
-
-- **Default model:** `opencode/kimi-2.5` (Kimi 2.5 via OpenCode zen), stored in `/workspace/group/opencode-model`
-- **Per-task override:** If the user explicitly requests a specific model for this task (e.g. "use claude sonnet for this"), pass `--model opencode/<model>` or `--model <provider>/<model>` for this invocation only — do NOT change the stored default
-- **Change group default:** If the user says "use X as the default model for this group from now on", run:
-  ```bash
-  echo "opencode/<model>" > /workspace/group/opencode-model
-  ```
-  Confirm to the user what the new default is.
-
-### OpenCode reads the repo's own skills
-
-OpenCode automatically discovers and follows:
-- `AGENTS.md` — repo-specific coding rules and conventions (preferred)
-- `CLAUDE.md` — fallback instruction file
-- `opencode.json` — model and tool configuration
-
-**This is why the `cd` to the repo root before `opencode run` is critical.** The NanoClaw agent does not need to know repo-specific conventions — OpenCode handles them entirely.
+---
 
 ## 5. Quality checks
-
-After OpenCode commits, run available checks. Detect what exists and run it:
 
 ```bash
 cd "${REPO_DIR}"
 
-# TypeScript
-if [ -f tsconfig.json ]; then
-  npx tsc --noEmit 2>&1 && echo "✓ typecheck" || echo "✗ typecheck failed"
-fi
-
-# npm scripts
 if [ -f package.json ]; then
-  npm run lint 2>&1 && echo "✓ lint" || echo "✗ lint failed (or n/a)"
-  npm test 2>&1 && echo "✓ tests" || echo "✗ tests failed (or n/a)"
-  npm run format:check 2>&1 && echo "✓ format" || echo "✗ format failed (or n/a)"
+  npm test 2>&1 || true
+  npm run lint 2>&1 || true
+  npm run typecheck 2>&1 \
+    || npm run type-check 2>&1 \
+    || npx tsc --noEmit 2>&1 \
+    || true
 fi
 
-# Makefile
 if [ -f Makefile ]; then
-  make lint test 2>&1 || true
+  make test lint 2>&1 || true
 fi
 ```
 
 If a check fails:
-1. Try to fix the issue directly
-2. Or re-invoke OpenCode: `opencode run --model "${MODEL}" "Fix these errors: <paste error output>"`
+1. Fix it directly if small
+2. Re-run Claude Code: `claude --dangerously-skip-permissions --model "${IMPL_MODEL}" "Fix these errors: <paste output>"`
 3. Re-run checks until green, or report the blocker to the user
 
-## 6. Push and create PR
+---
 
-Once all checks pass:
+## 6. Push and open PR
 
 ```bash
 git push origin HEAD
-```
 
-Then create the PR with the confirmed plan in the body:
+BRANCH=$(git rev-parse --abbrev-ref HEAD)
+GROUP_FOLDER=$(basename /workspace/group)
 
-```bash
-gh pr create \
-  --title "<concise present-tense title, under 72 chars>" \
-  --body "## Summary
-<1-3 sentences describing what this PR does>
-
-## Plan
-<The confirmed plan, verbatim as approved by the user>
+# Create PR using git's push options (no API call needed)
+# If gh CLI is available, use it; otherwise instruct user to create PR manually
+if command -v gh &>/dev/null; then
+  PR_URL=$(gh pr create \
+    --title "<present-tense title, under 72 chars>" \
+    --body "## Summary
+<1-3 sentences>
 
 ## Changes
-<Bulleted list of files changed and why>
+<bulleted list of files changed and why>
 
 ## Quality Checks
-- Typecheck: <pass / fail / n/a>
 - Tests: <pass / fail / n/a>
 - Lint: <pass / fail / n/a>
+- Typecheck: <pass / fail / n/a>
 
 ---
-*Created by NanoClaw agent (${GROUP_FOLDER}) via OpenCode (${MODEL})*"
+*Created by NanoClaw agent (${GROUP_FOLDER})*" \
+    --base "${DEFAULT_BRANCH}" 2>&1 | grep -o 'https://.*')
+  echo "PR created: ${PR_URL}"
+else
+  echo "Push complete: https://github.com/${OWNER}/${REPO}/compare/${DEFAULT_BRANCH}...${BRANCH}"
+  echo "Open that URL to create the PR manually."
+fi
 ```
 
-Send the PR URL to the user.
+Send the PR URL (or compare link) to the user.
+
+---
 
 ## 7. Safety rules — absolute, never violate
 
-- **NEVER** push to `main`, `master`, or any default branch — always use an `agent/*/` branch
-- **NEVER** force-push (`--force`)
-- **NEVER** merge the PR — only the human user merges
-- **NEVER** proceed to implementation without explicit user confirmation of the plan
-- **ALWAYS** `cd` to the repo root before invoking `opencode run` so it discovers the repo's skill files
-- **ALWAYS** detect the default branch dynamically — do not assume it is `main`
+- **System quota > coding tasks.** If budget is critically low, tell the user and do not proceed.
+- **NEVER** push to `main`, `master`, or the default branch — always use an `agent/*/` branch
+- **NEVER** force-push
+- **NEVER** merge the PR — only the human merges
+- **NEVER** start implementation without explicit user confirmation of the plan
+- **ALWAYS** `cd` to the repo root before running `claude`
+- **ALWAYS** detect the default branch dynamically — never assume `main`
+- **ALWAYS** include `--model` when running `claude` — never let it default silently
+

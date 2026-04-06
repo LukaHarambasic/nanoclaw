@@ -113,6 +113,21 @@ Instructions here...
 - Put code in separate files, not inline in the markdown
 - See the [skills standard](https://code.claude.com/docs/en/skills) for all available frontmatter fields
 
+**Dependency documentation:** When a skill has relationships with other skills, document them as blockquotes near the top of the SKILL.md body (after the `#` heading):
+
+- **Conflicts with** — for mutually exclusive skills (e.g., `/init-onecli` vs `/use-native-credential-proxy`)
+- **Requires** — for hard prerequisites (e.g., `/use-local-whisper` requires `/add-voice-transcription`)
+- **See also** — for related skills that complement this one (e.g., voice-transcription → local-whisper as optional next step)
+- **Disambiguation** — when multiple skills cover similar domains (e.g., the 3 email skills)
+
+Example:
+```markdown
+# My Skill
+
+> **Conflicts with:** `/other-skill`. These are mutually exclusive — applying this replaces the other.
+> **Requires:** `/prerequisite-skill` must be applied first.
+```
+
 ## Testing
 
 Test your contribution on a fresh clone before submitting. For skills, run the skill end-to-end and verify it works.

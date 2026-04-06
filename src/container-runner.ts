@@ -281,6 +281,20 @@ async function buildContainerArgs(
   });
   if (onecliApplied) {
     logger.info({ containerName }, 'OneCLI gateway config applied');
+    // git uses GIT_SSL_CAINFO (not SSL_CERT_FILE) to locate CA certs.
+    // Without this, git rejects the OneCLI proxy's MITM certificate.
+    args.push('-e', 'GIT_SSL_CAINFO=/tmp/onecli-combined-ca.pem');
+
+    // Warn if OneCLI didn't inject proxy env vars — git/curl won't route through proxy
+    const hasProxy = args.some(
+      (a, i) => i > 0 && args[i - 1] === '-e' && /PROXY/i.test(a),
+    );
+    if (!hasProxy) {
+      logger.warn(
+        { containerName },
+        'No proxy env vars in OneCLI config — git/curl may not route through proxy',
+      );
+    }
   } else {
     logger.warn(
       { containerName },

@@ -5,6 +5,8 @@ description: Add Gmail integration to NanoClaw. Can be configured as a tool (age
 
 # Add Gmail Integration
 
+> **Email skills in NanoClaw:** There are 3 email-related skills. `/add-gmail` (this skill) adds Gmail as a host channel or tool-only integration. `gws-mail` is a container skill for personal email read+draft via the `gws` CLI. `shared-email` is a container skill for the agent account (agentosassistant@gmail.com) via `mcp__gmail__*` tools.
+
 This skill adds Gmail support to NanoClaw — either as a tool (read, send, search, draft) or as a full channel that polls the inbox.
 
 ## Phase 1: Pre-flight

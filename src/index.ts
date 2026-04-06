@@ -853,6 +853,13 @@ async function main(): Promise<void> {
     },
     registeredGroups: () => registeredGroups,
     registerGroup,
+    createSlackChannel: (name, inviteUserIds) => {
+      const slackCh = channels.find((ch) => ch.name === 'slack');
+      if (!slackCh?.createChannel) {
+        throw new Error('Slack channel not connected or does not support createChannel');
+      }
+      return slackCh.createChannel(name, inviteUserIds);
+    },
     syncGroups: async (force: boolean) => {
       await Promise.all(
         channels

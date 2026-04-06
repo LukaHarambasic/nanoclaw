@@ -5,6 +5,8 @@ description: Replace OneCLI gateway with the built-in credential proxy. For user
 
 # Use Native Credential Proxy
 
+> **Conflicts with:** `/init-onecli`. These are mutually exclusive credential strategies. If OneCLI is active, this skill will replace it with the native `.env`-based proxy. To go the other direction, use `/init-onecli`.
+
 This skill replaces the OneCLI gateway with NanoClaw's built-in credential proxy. Containers get credentials injected via a local HTTP proxy that reads from `.env` — no external services needed.
 
 ## Phase 1: Pre-flight

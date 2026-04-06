@@ -24,12 +24,8 @@ RUN apt-get update && apt-get install -y \
     libxshmfence1 \
     curl \
     git \
+    jq \
     && rm -rf /var/lib/apt/lists/*
-
-# Install GitHub CLI (amd64 / Intel)
-RUN GH_VERSION="2.65.0" && \
-    curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_amd64.tar.gz" \
-    | tar -xz -C /usr/local --strip-components=1 "gh_${GH_VERSION}_linux_amd64/bin/gh"
 
 # Install OpenCode
 RUN curl -fsSL https://opencode.ai/install | bash

@@ -5,6 +5,8 @@ description: Install and initialize OneCLI Agent Vault. Migrates existing .env c
 
 # Initialize OneCLI Agent Vault
 
+> **Conflicts with:** `/use-native-credential-proxy`. These are mutually exclusive credential strategies. If the native proxy is active, this skill will replace it with OneCLI. To go the other direction, use `/use-native-credential-proxy`.
+
 This skill installs OneCLI, configures the Agent Vault gateway, and migrates any existing `.env` credentials into it. Run this after `/update-nanoclaw` introduces OneCLI as a breaking change, or any time OneCLI needs to be set up from scratch.
 
 **Principle:** When something is broken or missing, fix it. Don't tell the user to go fix it themselves unless it genuinely requires their manual action (e.g. pasting a token).

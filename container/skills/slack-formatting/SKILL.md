@@ -7,6 +7,8 @@ description: Format messages for Slack using mrkdwn syntax. Use when responding 
 
 When responding to Slack channels, use Slack's mrkdwn syntax instead of standard Markdown.
 
+> **Related:** `channel-formatting` (host skill) automatically converts Markdown to platform-native syntax on the host side. This container skill teaches you the syntax directly so your output is already correct. Both can coexist.
+
 ## How to detect Slack context
 
 Check your group folder name or workspace path:

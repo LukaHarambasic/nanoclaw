@@ -101,6 +101,11 @@ export interface Channel {
   syncGroups?(force: boolean): Promise<void>;
   // Optional: upload a file as an attachment. Channels that support it implement it.
   sendFile?(jid: string, filePath: string, filename?: string): Promise<void>;
+  // Optional: create a new channel/group and return its JID.
+  createChannel?(
+    name: string,
+    inviteUserIds?: string[],
+  ): Promise<{ jid: string; channelId: string; name: string }>;
 }
 
 // Callback type that channels use to deliver inbound messages

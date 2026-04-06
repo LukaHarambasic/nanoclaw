@@ -10,10 +10,16 @@ IMAGE_NAME="nanoclaw-agent"
 TAG="${1:-latest}"
 CONTAINER_RUNTIME="${CONTAINER_RUNTIME:-docker}"
 
+export DOCKER_BUILDKIT=1
+
 echo "Building NanoClaw agent container image..."
 echo "Image: ${IMAGE_NAME}:${TAG}"
 
-${CONTAINER_RUNTIME} build -t "${IMAGE_NAME}:${TAG}" .
+if ${CONTAINER_RUNTIME} buildx version &>/dev/null; then
+  ${CONTAINER_RUNTIME} buildx build --load -t "${IMAGE_NAME}:${TAG}" .
+else
+  DOCKER_BUILDKIT=0 ${CONTAINER_RUNTIME} build -t "${IMAGE_NAME}:${TAG}" .
+fi
 
 echo ""
 echo "Build complete!"

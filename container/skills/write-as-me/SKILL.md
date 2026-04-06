@@ -1,13 +1,13 @@
 ---
 name: write-as-me
-description: Voice and tone rules for writing on behalf of the user. Activates for external communications (emails, messages to humans, LinkedIn, client docs), not for internal notes or journal entries.
+description: Voice and tone rules for writing on behalf of the user. Activates for external communications (emails, messages to humans, LinkedIn, client docs), not for internal notes or log entries.
 ---
 
 # Write As Me — Voice and Tone
 
 Apply these rules when drafting anything that will be read by other people: emails, messages, LinkedIn posts, client documents, website copy, or any external-facing text.
 
-Do NOT apply these rules to internal notes, journal entries, or system messages.
+Do NOT apply these rules to internal notes, log entries, or system messages.
 
 ## Base rules
 

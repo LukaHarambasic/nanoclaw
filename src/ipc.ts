@@ -3,7 +3,7 @@ import path from 'path';
 
 import { CronExpressionParser } from 'cron-parser';
 
-import { DATA_DIR, IPC_POLL_INTERVAL, TIMEZONE } from './config.js';
+import { ASSISTANT_NAME, DATA_DIR, IPC_POLL_INTERVAL, TIMEZONE } from './config.js';
 import { AvailableGroup } from './container-runner.js';
 import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
 import { isValidGroupFolder } from './group-folder.js';
@@ -23,6 +23,10 @@ export interface IpcDeps {
     registeredJids: Set<string>,
   ) => void;
   onTasksChanged: () => void;
+  createSlackChannel?: (
+    name: string,
+    inviteUserIds?: string[],
+  ) => Promise<{ jid: string; channelId: string; name: string }>;
 }
 
 let ipcWatcherRunning = false;
@@ -173,6 +177,11 @@ export async function processTaskIpc(
     trigger?: string;
     requiresTrigger?: boolean;
     containerConfig?: RegisteredGroup['containerConfig'];
+    // For spawn_agent
+    channelName?: string;
+    inviteUserIds?: string[];
+    welcomeMessage?: string;
+    claudeMd?: string;
   },
   sourceGroup: string, // Verified identity from IPC directory
   isMain: boolean, // Verified from directory path
@@ -461,6 +470,129 @@ export async function processTaskIpc(
         );
       }
       break;
+
+    case 'spawn_agent': {
+      if (!isMain) {
+        logger.warn(
+          { sourceGroup },
+          'Unauthorized spawn_agent attempt blocked',
+        );
+        break;
+      }
+      if (!deps.createSlackChannel) {
+        logger.warn('spawn_agent requires Slack channel to be connected');
+        break;
+      }
+      if (!data.name || !data.folder) {
+        logger.warn({ data }, 'spawn_agent requires name and folder');
+        break;
+      }
+      if (!isValidGroupFolder(data.folder)) {
+        logger.warn(
+          { folder: data.folder },
+          'spawn_agent: invalid folder name',
+        );
+        break;
+      }
+
+      // Derive Slack channel name: lowercase, hyphens, max 80 chars
+      const channelName =
+        data.channelName ||
+        data.folder.replace(/_/g, '-').toLowerCase().slice(0, 80);
+      const trigger = data.trigger || `@${ASSISTANT_NAME}`;
+
+      try {
+        const created = await deps.createSlackChannel(
+          channelName,
+          data.inviteUserIds,
+        );
+
+        // Register the group
+        deps.registerGroup(created.jid, {
+          name: data.name,
+          folder: data.folder,
+          trigger,
+          added_at: new Date().toISOString(),
+          containerConfig: data.containerConfig,
+          requiresTrigger:
+            data.requiresTrigger !== undefined ? data.requiresTrigger : true,
+        });
+
+        // Optionally write custom CLAUDE.md for the new group
+        if (data.claudeMd) {
+          const groupDir = path.join(
+            DATA_DIR,
+            '..',
+            'groups',
+            data.folder,
+          );
+          const mdPath = path.join(groupDir, 'CLAUDE.md');
+          fs.mkdirSync(path.dirname(mdPath), { recursive: true });
+          fs.writeFileSync(mdPath, data.claudeMd);
+          logger.info(
+            { folder: data.folder },
+            'Wrote custom CLAUDE.md for spawned agent',
+          );
+        }
+
+        // Post welcome message
+        const welcome =
+          data.welcomeMessage ||
+          `Agent *${data.name}* is ready. Mention \`${trigger}\` to interact.`;
+        await deps.sendMessage(created.jid, welcome);
+
+        // Write result back to IPC so the main agent can read it
+        const resultDir = path.join(
+          DATA_DIR,
+          'ipc',
+          sourceGroup,
+          'input',
+        );
+        fs.mkdirSync(resultDir, { recursive: true });
+        fs.writeFileSync(
+          path.join(resultDir, `spawn_result_${Date.now()}.json`),
+          JSON.stringify({
+            type: 'spawn_agent_result',
+            success: true,
+            jid: created.jid,
+            channelId: created.channelId,
+            channelName: created.name,
+            folder: data.folder,
+          }),
+        );
+
+        logger.info(
+          {
+            jid: created.jid,
+            channelName: created.name,
+            folder: data.folder,
+          },
+          'Agent spawned with new Slack channel',
+        );
+      } catch (err) {
+        logger.error(
+          { err, name: data.name, channelName },
+          'Failed to spawn agent',
+        );
+        // Write error back to IPC
+        const resultDir = path.join(
+          DATA_DIR,
+          'ipc',
+          sourceGroup,
+          'input',
+        );
+        fs.mkdirSync(resultDir, { recursive: true });
+        fs.writeFileSync(
+          path.join(resultDir, `spawn_result_${Date.now()}.json`),
+          JSON.stringify({
+            type: 'spawn_agent_result',
+            success: false,
+            error: String(err),
+          }),
+        );
+      }
+      break;
+    }
 
     default:
       logger.warn({ type: data.type }, 'Unknown IPC task type');
